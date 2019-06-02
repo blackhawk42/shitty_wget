@@ -42,6 +42,7 @@ var overwriteExisting = flag.Bool("over", false, "overwrite existing file with t
 var destDir = flag.String("dest", ".", "destination `directory` for downloaded files")
 var randomUserAgent = flag.Bool("random-agent", false, "randomnize reported user agent string; can help with bot blocking")
 var listUserAgents = flag.Bool("list-agents", false, "list avaiable User-Agent strings and exit")
+var customAgent = flag.String("custom-agent", "", "set a custom `User-Agent` string; overrides random-agent")
 var urlFiles FileNameList
 
 func main() {
@@ -70,11 +71,10 @@ func main() {
 		os.Exit(0)
 	}
 
-	customAgent := ""
-	if *randomUserAgent {
+	if *randomUserAgent && *customAgent == "" {
 		rand.Seed(time.Now().Unix())
-		customAgent = UserAgents[rand.Intn(len(UserAgents))]
-		fmt.Fprintf(os.Stderr, "used user-agent: %s\n", customAgent)
+		*customAgent = UserAgents[rand.Intn(len(UserAgents))]
+		fmt.Fprintf(os.Stderr, "used user-agent: %s\n", *customAgent)
 	}
 
 	// List of io.Readers to read URLs from. Initial length is 0; will append as
@@ -143,8 +143,8 @@ func main() {
 				return
 			}
 
-			if *randomUserAgent {
-				req.Header.Set("User-Agent", customAgent)
+			if *customAgent != "" {
+				req.Header.Set("User-Agent", *customAgent)
 			}
 
 			resp, errWorker := httpClient.Do(req)
