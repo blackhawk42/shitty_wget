@@ -41,8 +41,10 @@ var connections = flag.Int("c", 1, "number of `connections`, or files downloaded
 var overwriteExisting = flag.Bool("over", false, "overwrite existing file with the same name already in the filesystem; otherwise, will try to make an unique name")
 var destDir = flag.String("dest", ".", "destination `directory` for downloaded files")
 var randomUserAgent = flag.Bool("random-agent", false, "randomnize reported user agent string; can help with bot blocking")
-var listUserAgents = flag.Bool("list-agents", false, "list avaiable User-Agent strings and exit")
+var listUserAgents = flag.Bool("list-agents", false, "list internally avaiable User-Agent strings and exit")
 var customAgent = flag.String("custom-agent", "", "set a custom `User-Agent` string; overrides random-agent")
+var waitTime = flag.Int("wait", 0, "wait an amount of `seconds` between individual connections; numbers < 0 will be interpreted as 0; can be used in conjunction with random-wait")
+var randomWait = flag.Bool("random-wait", false, "instead of waiting a fixed amount of time, wait a random amount of seconds between 0 to the number specified by wait; not much will happen if wait is not specified")
 var urlFiles FileNameList
 
 func main() {
@@ -55,9 +57,12 @@ func main() {
 	flag.Var(&urlFiles, "i", "add an input `file` containing one URL per line; can be used multiple times")
 	flag.Parse()
 
-	// Make sure number of connections is setup to sumething reasonable
+	// Normilize certain variables
 	if *connections <= 0 {
 		*connections = 1
+	}
+	if *waitTime < 0 {
+		*waitTime = 0
 	}
 
 	if *listUserAgents {
@@ -71,16 +76,24 @@ func main() {
 		os.Exit(0)
 	}
 
+	rand.Seed(time.Now().Unix())
+
 	if *randomUserAgent && *customAgent == "" {
-		rand.Seed(time.Now().Unix())
 		*customAgent = UserAgents[rand.Intn(len(UserAgents))]
 		fmt.Fprintf(os.Stderr, "used user-agent: %s\n", *customAgent)
+	}
+
+	// Define a standard function to wait a certain amount of time
+	waitFunction := simpleWaitFunc
+
+	if *randomWait && *waitTime > 0 {
+		waitFunction = randomWaitFunc
 	}
 
 	// List of io.Readers to read URLs from. Initial length is 0; will append as
 	// necessary, ignoring errors and attempting to continue. The cap takes into account
 	// each reader, the newline that's always added at the end,
-	// and the args
+	// and the args plus it's newline
 	urlReaders := make([]io.Reader, 0, (len(urlFiles)*2)+len(flag.Args()))
 
 	for _, fName := range urlFiles {
@@ -96,7 +109,7 @@ func main() {
 
 	// Append last "file", made by all urls passed with the command line
 	if len(flag.Args()) > 0 {
-		urlReaders = append(urlReaders, strings.NewReader(strings.Join(flag.Args(), "\n")))
+		urlReaders = append(urlReaders, strings.NewReader(strings.Join(flag.Args(), "\n")+"\n"))
 	}
 
 	httpClient := &http.Client{}
@@ -120,13 +133,33 @@ func main() {
 		}
 	}
 
-	urlScanner := bufio.NewScanner(io.MultiReader(urlReaders...))
-	for urlScanner.Scan() {
+	urlScanner := bufio.NewReader(io.MultiReader(urlReaders...))
+	firstLoop := true
+	for {
 		// This is a serial part, which should be done in the main thread
-		url := urlScanner.Text()
 
+		line, err := urlScanner.ReadString('\n')
+		if err != nil {
+			// Gneral unexpected errors
+			if err != io.EOF {
+				fmt.Fprintf(os.Stderr, "error while scanning lines: %v\n", err)
+			}
+
+			// We received an EOF. Because of initial program setup, the scanner
+			// should end in newline and, therefore, has no more data to consume.
+			// Can break loop without worries
+			break
+		}
+
+		if !firstLoop {
+			waitFunction(*waitTime)
+		} else {
+			firstLoop = false
+		}
+
+		url := strings.TrimSpace(line)
 		// Skip empty lines
-		if strings.TrimSpace(url) == "" {
+		if url == "" {
 			continue
 		}
 
@@ -165,7 +198,8 @@ func main() {
 
 			filename, errWorker = filepath.Abs(filename)
 			if errWorker != nil {
-				fmt.Fprintf(os.Stderr, "error while getting absolute path of %s: %v", filename, errWorker)
+				fmt.Fprintf(os.Stderr, "error while getting absolute path of %s: %v\n", filename, errWorker)
+				return
 			}
 
 			_, errWorker = io.Copy(f, resp.Body)
@@ -180,6 +214,18 @@ func main() {
 
 	wg.Wait()
 
+}
+
+// simpleWaitFunc waits a given amount of time in seconds
+func simpleWaitFunc(waitTime int) {
+	time.Sleep(time.Duration(waitTime) * time.Second)
+}
+
+// randomWait waits a random amount of time, from 0 to waitTime seconds.
+//
+// Will panic if waitTime < 0
+func randomWaitFunc(waitTime int) {
+	time.Sleep(time.Duration(rand.Intn(waitTime+1)) * time.Second)
 }
 
 // fileExists is a utility function that checks if  file exists
@@ -197,9 +243,14 @@ func fileExists(fileName string) bool {
 // Optionally, can try to create a unique filename if it detects the file already exists,
 // to avoid overwriting
 func getNameFromUrl(url string, detectRepeatedNames bool) string {
-	baseName := path.Base(url)
+	baseName := strings.Split(path.Base(url), "?")[0]
 
 	currentName := baseName
+
+	// If name is empty, use a timestampt
+	if currentName == "" {
+		currentName = time.Now().Format(time.RFC3339)
+	}
 
 	if detectRepeatedNames {
 		ext := filepath.Ext(baseName)
